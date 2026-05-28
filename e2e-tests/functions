@@ -1085,9 +1085,11 @@ spinup_pxc() {
 
 	desc 'check if all 3 Pods started'
 	local proxy=$(get_proxy "$cluster")
+	local proxy_size=$(get_proxy_size "$cluster")
 	kubectl_bin wait --for=condition=Ready pod -l app.kubernetes.io/instance=monitoring,app.kubernetes.io/managed-by=percona-xtradb-cluster-operator --timeout=300s -n ${namespace} || true
-	wait_for_running "$proxy" 1
 	wait_for_running "$cluster-pxc" "$size"
+	wait_for_running "$proxy" "$proxy_size"
+	wait_cluster_consistency "$cluster" "$size" "$proxy_size"
 	sleep $sleep
 
 	local secret_name=$(kubectl get pxc $cluster -o jsonpath='{.spec.secretsName}')

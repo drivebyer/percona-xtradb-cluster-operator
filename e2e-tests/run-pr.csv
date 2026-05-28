@@ -70,6 +70,7 @@ storage,8.0
 tls-issue-cert-manager-ref,8.0
 tls-issue-cert-manager,8.0
 tls-issue-self,8.0
+unsafe-flags,8.0
 upgrade-consistency,8.0
 upgrade-consistency,8.4
 upgrade-haproxy,5.7

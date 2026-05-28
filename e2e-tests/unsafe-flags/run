@@ -1,0 +1,272 @@
+#!/bin/bash
+
+set -o errexit
+
+test_dir=$(realpath "$(dirname "$0")")
+# shellcheck source=/dev/null
+. "${test_dir}"/../functions
+
+cluster="unsafe-flags"
+pxc_size=3
+proxy_size=3
+
+set_debug
+
+patch_cluster() {
+	kubectl_bin patch pxc "${cluster}" --type=merge --patch "$1"
+}
+
+patch_cluster_size() {
+	local component=$1
+	local size=$2
+	local flag=$3
+	local enabled=$4
+
+	patch_cluster "$(
+		jq --null-input --compact-output \
+			--arg component "${component}" \
+			--arg flag "${flag}" \
+			--argjson size "${size}" \
+			--argjson enabled "${enabled}" \
+			'{spec:{($component):{size:$size},unsafeFlags:{($flag):$enabled}}}'
+	)"
+}
+
+root_password() {
+	getSecretData "$(kubectl_bin get pxc "${cluster}" -o jsonpath='{.spec.secretsName}')" "root"
+}
+
+write_data() {
+	local id=$1
+	local host=${2:-"${cluster}-pxc-0.${cluster}-pxc"}
+	local root_pass
+
+	root_pass=$(root_password)
+	run_mysql \
+		"INSERT IGNORE myApp.myApp (id) VALUES (${id})" \
+		"-h ${host} -uroot -p'${root_pass}'"
+}
+
+compare_data() {
+	local expected=$1
+	local size=${2:-${pxc_size}}
+	local root_pass
+
+	root_pass=$(root_password)
+	for i in $(seq 0 $((size - 1))); do
+		compare_mysql_cmd "select-${expected}" \
+			"SELECT GROUP_CONCAT(id ORDER BY id) FROM myApp.myApp;" \
+			"-h ${cluster}-pxc-${i}.${cluster}-pxc -uroot -p'${root_pass}'"
+	done
+}
+
+compare_proxy_data() {
+	local expected=$1
+	local root_pass
+
+	root_pass=$(root_password)
+	compare_mysql_cmd "select-${expected}" \
+		"SELECT GROUP_CONCAT(id ORDER BY id) FROM myApp.myApp;" \
+		"-h $(get_proxy "${cluster}") -uroot -p'${root_pass}'"
+}
+
+wait_cluster_initializing() {
+	local max_retry="${1:-180}"
+	local retry=0
+
+	set +o xtrace
+	echo -n "waiting for pxc/${cluster} to become initializing"
+	until [[ "$(kubectl_bin get pxc "${cluster}" -o jsonpath='{.status.state}')" == "initializing" ]]; do
+		sleep 2
+		echo -n .
+		((retry += 1))
+		if [[ ${retry} -ge ${max_retry} ]]; then
+			kubectl_bin get pxc "${cluster}" -o yaml
+			echo "pxc/${cluster} did not become initializing"
+			exit 1
+		fi
+	done
+	echo ".Ok"
+	set_debug
+}
+
+create_blocked_pvc() {
+	local pvc=$1
+
+	kubectl_bin apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${pvc}
+spec:
+  storageClassName: unsafe-flags-missing-storage-class
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+EOF
+}
+
+wait_pvc_pending() {
+	local pvc=$1
+	local max_retry="${2:-180}"
+	local retry=0
+
+	set +o xtrace
+	echo -n "waiting for pvc/${pvc} to stay Pending"
+	until [[ "$(kubectl_bin get pvc "${pvc}" -o jsonpath='{.status.phase}')" == "Pending" ]]; do
+		sleep 2
+		echo -n .
+		((retry += 1))
+		if [[ ${retry} -ge ${max_retry} ]]; then
+			kubectl_bin describe pvc "${pvc}"
+			echo "pvc/${pvc} is not Pending"
+			exit 1
+		fi
+	done
+	echo ".Ok"
+	set_debug
+}
+
+tls_should_be_disabled() {
+	local root_pass
+
+	if [[ "$(kubectl_bin get pxc "${cluster}" -o jsonpath='{.spec.tls.enabled}')" != "false" ]]; then
+		kubectl_bin get pxc "${cluster}" -o yaml
+		echo "tls is not disabled"
+		exit 1
+	fi
+
+	root_pass=$(getSecretData "$(kubectl_bin get pxc "${cluster}" -o jsonpath='{.spec.secretsName}')" "root")
+
+	for i in $(seq 0 $((pxc_size - 1))); do
+		if kubectl_bin exec "${cluster}-pxc-${i}" -c pxc -- \
+			bash -c "grep -qE '^[[:space:]]*(ssl-ca|ssl-cert|ssl-key)[[:space:]]*=' /etc/mysql/node.cnf"; then
+			echo "${cluster}-pxc-${i} still has TLS options in /etc/mysql/node.cnf:"
+			kubectl_bin exec "${cluster}-pxc-${i}" -c pxc -- \
+				bash -c "grep -E '^[[:space:]]*(ssl-ca|ssl-cert|ssl-key)[[:space:]]*=' /etc/mysql/node.cnf"
+			exit 1
+		fi
+
+		kubectl_bin exec "${cluster}-pxc-${i}" -c pxc -- \
+			bash -c "MYSQL_PWD='${root_pass}' mysql --ssl-mode=DISABLED -uroot -NBe 'SELECT 1'"
+
+		if kubectl_bin exec "${cluster}-pxc-${i}" -c pxc -- \
+			bash -c "MYSQL_PWD='${root_pass}' mysql --ssl-mode=DISABLED -uroot -NBe \"SHOW STATUS LIKE 'Ssl_cipher';\" | awk '\$2 != \"\" { found=1 } END { exit found ? 0 : 1 }'"; then
+			echo "${cluster}-pxc-${i} is still using TLS for a --ssl-mode=DISABLED session:"
+			kubectl_bin exec "${cluster}-pxc-${i}" -c pxc -- \
+				bash -c "MYSQL_PWD='${root_pass}' mysql --ssl-mode=DISABLED -uroot -NBe \"SHOW STATUS LIKE 'Ssl_cipher';\""
+			exit 1
+		fi
+	done
+}
+
+test_tls_unsafe_flag() {
+	desc 'enable unsafeFlags.tls and disable TLS'
+	patch_cluster '{"spec":{"tls":{"enabled":false},"unsafeFlags":{"tls":true}}}'
+	wait_cluster_consistency "${cluster}" "${pxc_size}" "${proxy_size}"
+	tls_should_be_disabled
+
+	desc 'disable unsafeFlags.tls and enable TLS'
+	patch_cluster '{"spec":{"tls":{"enabled":true},"unsafeFlags":{"tls":false}}}'
+	wait_cluster_consistency "${cluster}" "${pxc_size}" "${proxy_size}"
+}
+
+# The data 100500 is added by default in spinup_pxc
+test_pxc_size_unsafe_flag() {
+	desc 'write data before PXC unsafe size test'
+	write_data 100501
+	compare_data "100500-100501"
+
+	desc 'enable unsafeFlags.pxcSize and scale PXC to one replica'
+	patch_cluster '{"spec":{"pxc":{"size":1},"unsafeFlags":{"pxcSize":true}}}'
+	wait_for_running "${cluster}-pxc" 1
+	wait_cluster_consistency "${cluster}" 1 "${proxy_size}"
+	compare_data "100500-100501" 1
+
+	desc 'write data while PXC runs with one replica'
+	write_data 100502
+	compare_data "100500-100501-100502" 1
+
+	desc 'disable unsafeFlags.pxcSize and scale PXC back'
+	patch_cluster '{"spec":{"pxc":{"size":3},"unsafeFlags":{"pxcSize":false}}}'
+	wait_for_running "${cluster}-pxc" "${pxc_size}"
+	wait_cluster_consistency "${cluster}" "${pxc_size}" "${proxy_size}"
+	compare_data "100500-100501-100502"
+}
+
+# The data 100500 is added by default in spinup_pxc
+test_proxy_size_unsafe_flag() {
+	local proxy_engine
+	local proxy
+
+	proxy_engine=$(get_proxy_engine "${cluster}")
+	proxy=$(get_proxy "${cluster}")
+
+	desc "write data before ${proxy_engine} unsafe size test"
+	write_data 100503 "${proxy}"
+	compare_proxy_data "100500-100501-100502-100503"
+	compare_data "100500-100501-100502-100503"
+
+	desc "enable unsafeFlags.proxySize and scale ${proxy_engine} to one replica"
+	patch_cluster_size "${proxy_engine}" 1 proxySize true
+	wait_for_running "${proxy}" 1
+	wait_cluster_consistency "${cluster}" "${pxc_size}" 1
+	compare_proxy_data "100500-100501-100502-100503"
+	compare_data "100500-100501-100502-100503"
+
+	desc "write data while ${proxy_engine} runs with one replica"
+	write_data 100504 "${proxy}"
+	compare_proxy_data "100500-100501-100502-100503-100504"
+	compare_data "100500-100501-100502-100503-100504"
+
+	desc "disable unsafeFlags.proxySize and scale ${proxy_engine} back"
+	patch_cluster_size "${proxy_engine}" 3 proxySize false
+	wait_for_running "${proxy}" "${proxy_size}"
+	wait_cluster_consistency "${cluster}" "${pxc_size}" "${proxy_size}"
+	compare_proxy_data "100500-100501-100502-100503-100504"
+	compare_data "100500-100501-100502-100503-100504"
+}
+
+test_backup_if_unhealthy_unsafe_flag() {
+	local backup="on-demand-backup-pvc"
+	local blocked_pvc="datadir-${cluster}-pxc-4"
+
+	desc 'create invalid PVC for the fifth PXC replica'
+	create_blocked_pvc "${blocked_pvc}"
+	wait_pvc_pending "${blocked_pvc}"
+
+	desc 'scale PXC to five replicas and enable unsafeFlags.backupIfUnhealthy'
+	patch_cluster '{"spec":{"pxc":{"size":5},"unsafeFlags":{"backupIfUnhealthy":true}}}'
+	wait_cluster_initializing
+
+	desc 'run backup while cluster is initializing'
+	run_backup "${cluster}" "${backup}"
+
+	desc "pvc/${blocked_pvc} should still be Pending after backup"
+	wait_pvc_pending "${blocked_pvc}" 30
+
+	desc 'disable unsafeFlags.backupIfUnhealthy and scale PXC back'
+	patch_cluster '{"spec":{"pxc":{"size":3},"unsafeFlags":{"backupIfUnhealthy":false}}}'
+	kubectl_bin delete pvc "${blocked_pvc}" --ignore-not-found=true
+	wait_for_running "${cluster}-pxc" "${pxc_size}"
+	wait_cluster_consistency "${cluster}" "${pxc_size}" "${proxy_size}"
+}
+
+main() {
+	# shellcheck disable=SC2154
+	create_infra "${namespace}"
+
+	spinup_pxc "${cluster}" "${test_dir}/conf/${cluster}.yml" "${pxc_size}"
+
+	test_tls_unsafe_flag
+	test_pxc_size_unsafe_flag
+	test_proxy_size_unsafe_flag
+	test_backup_if_unhealthy_unsafe_flag
+
+	destroy "${namespace}"
+	desc "test passed"
+}
+
+main

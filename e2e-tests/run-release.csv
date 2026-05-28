@@ -48,6 +48,7 @@ storage
 tls-issue-cert-manager
 tls-issue-cert-manager-ref
 tls-issue-self
+unsafe-flags
 upgrade-consistency
 upgrade-haproxy
 upgrade-proxysql
