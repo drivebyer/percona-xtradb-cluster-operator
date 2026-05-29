@@ -1088,7 +1088,9 @@ spinup_pxc() {
 	local proxy_size=$(get_proxy_size "$cluster")
 	kubectl_bin wait --for=condition=Ready pod -l app.kubernetes.io/instance=monitoring,app.kubernetes.io/managed-by=percona-xtradb-cluster-operator --timeout=300s -n ${namespace} || true
 	wait_for_running "$cluster-pxc" "$size"
-	wait_for_running "$proxy" "$proxy_size"
+	if [[ -n "$proxy_size" && "$proxy_size" != "0" ]]; then
+		wait_for_running "$proxy" "$proxy_size"
+	fi
 	wait_cluster_consistency "$cluster" "$size" "$proxy_size"
 	sleep $sleep
 
@@ -1250,11 +1252,44 @@ check_pvc_md5() {
 run_backup() {
 	local cluster=$1
 	local backup=$2
+	local backup_file=${3:-}
+	local status=${4:-Succeeded}
+	local backup_path
 
 	log "run pxc-backup/${backup}"
-	kubectl_bin apply \
-		-f ${test_dir}/conf/${backup}.yml
-	wait_backup ${backup}
+
+	if [[ -n "${backup_file}" ]]; then
+		backup_path="${test_dir}/conf/${backup_file}.yml"
+	else
+		backup_path="${src_dir}/deploy/backup/backup.yaml"
+	fi
+
+	yq eval ".metadata.name = \"${backup}\" | .spec.pxcCluster = \"${cluster}\"" "${backup_path}" \
+		| kubectl_bin apply -f -
+
+	wait_backup "${backup}" "${status}"
+}
+
+run_restore() {
+	local cluster=$1
+	local restore=$2
+	local backup=$3
+	local restore_file=${4:-}
+	local restore_path
+
+	log "run pxc-restore/${restore}"
+
+	if [[ -n "${restore_file}" ]]; then
+		restore_path="${test_dir}/conf/${restore_file}.yml"
+	else
+		restore_path="${src_dir}/deploy/backup/restore.yaml"
+	fi
+
+	yq eval ".metadata.name = \"${restore}\" | .spec.pxcCluster = \"${cluster}\" | .spec.backupName = \"${backup}\"" "${restore_path}" \
+		| kubectl_bin apply -f -
+
+	wait_backup_restore "${restore}"
+	kubectl_bin logs "job/restore-job-${restore}-${cluster}"
 }
 
 run_recovery_check() {
