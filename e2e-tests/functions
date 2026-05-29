@@ -534,6 +534,9 @@ compare_kubectl() {
 			del(.metadata.annotations."kubectl.kubernetes.io/last-applied-configuration") |
 			del(.metadata.annotations."kubernetes.io/psp") |
 			del(.metadata.annotations."batch.kubernetes.io/job-tracking") |
+			del(.metadata.annotations."topology.kubernetes.io/region") |
+			del(.metadata.annotations."topology.kubernetes.io/zone") |
+			del(.metadata.annotations."networking.gke.io/target-pool") |
 			del(.metadata.labels."batch.kubernetes.io/job-name") |
 			del(.metadata.labels."job-name") |
 			del(.metadata.annotations."cloud.google.com/neg") |
