@@ -1,7 +1,7 @@
 apiVersion: pxc.percona.com/v1
 kind: PerconaXtraDBCluster
 metadata:
-  name: unsafe-flags
+  name: pxc-size
   finalizers:
     - percona.com/delete-pxc-pods-in-order
 spec:

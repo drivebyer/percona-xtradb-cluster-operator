@@ -137,6 +137,11 @@ version_gt() {
 	fi
 }
 
+get_pxc_size() {
+	local cluster=${1}
+	kubectl_bin get pxc "${cluster}" -o 'jsonpath={.spec.pxc.size}'
+}
+
 get_proxy_size() {
 	local cluster=${1}
 	if [[ "$(kubectl_bin get pxc "${cluster}" -o 'jsonpath={.spec.haproxy.enabled}')" == "true" ]]; then
@@ -244,7 +249,7 @@ wait_pod() {
 	set +o xtrace
 	kubectl_bin wait --for=condition=Ready pod/${pod} --timeout="${max_retry}s" ${ns:+-n $ns} || true
 	retry=0
-	echo -n "waiting for pod/$pod to become Ready"
+	echo "waiting for pod/$pod to become Ready"
 	until kubectl_bin get ${ns:+-n $ns} pod/$pod -o jsonpath='{.status.conditions[?(@.type == "Ready")].status}' 2>/dev/null | grep -q -i 'True' \
 		&& kubectl_bin get ${ns:+-n $ns} pod/$pod | grep -q "^$pod" \
 		&& ! IS_FULL_CRASH=$(kubectl_bin logs --tail=1 ${ns:+-n $ns} pod/$pod ${container:+ -c $container} | grep LAST_LINE); do
@@ -422,7 +427,7 @@ wait_for_running() {
 	local name="$1"
 	let last_pod="$(($2 - 1))" || :
 	local max_retry="${3:-480}"
-	desc "wait for running cluster"
+	desc "Waiting for ${2} running pods for ${name}"
 	for i in $(seq 0 $last_pod); do
 		wait_pod ${name}-${i} ${max_retry}
 	done
@@ -1083,14 +1088,12 @@ spinup_pxc() {
 		apply_config "$config"
 	fi
 
-	desc 'check if all 3 Pods started'
+	desc "waiting pods to be running for ${cluster}"
 	local proxy=$(get_proxy "$cluster")
 	local proxy_size=$(get_proxy_size "$cluster")
-	kubectl_bin wait --for=condition=Ready pod -l app.kubernetes.io/instance=monitoring,app.kubernetes.io/managed-by=percona-xtradb-cluster-operator --timeout=300s -n ${namespace} || true
 	wait_for_running "$cluster-pxc" "$size"
-	if [[ -n "$proxy_size" && "$proxy_size" != "0" ]]; then
-		wait_for_running "$proxy" "$proxy_size"
-	fi
+	wait_for_running "$proxy" "$proxy_size"
+
 	wait_cluster_consistency "$cluster" "$size" "$proxy_size"
 	sleep $sleep
 
@@ -2439,4 +2442,106 @@ wait_for_password_propagation() {
 		fi
 	done
 	echo "Old password successfully discarded after $retry retries"
+}
+
+get_password() {
+	local cluster=$1
+	local user=$2
+
+	getSecretData \
+		"$(kubectl_bin get pxc "${cluster}" -o jsonpath='{.spec.secretsName}')" \
+		"${user}"
+}
+
+patch_cluster() {
+	local cluster=$1
+	local patch=$2
+
+	kubectl_bin patch pxc "${cluster}" --type=merge --patch "${patch}"
+}
+
+write_data() {
+	local cluster=$1
+	local id=$2
+	local host=${3:-"${cluster}-pxc-0.${cluster}-pxc"}
+
+	local root_pass
+	root_pass=$(get_password "${cluster}" "root")
+
+	run_mysql \
+		"INSERT IGNORE myApp.myApp (id) VALUES (${id})" \
+		"-h ${host} -uroot -p'${root_pass}'"
+}
+
+compare_data() {
+	local cluster=$1
+	local id=$2
+	local use_proxy=${3:-false}
+	local size
+
+	local root_pass
+	root_pass=$(get_password "${cluster}" "root")
+
+	if [[ ${use_proxy} == true || ${use_proxy} == "use-proxy" ]]; then
+		local host
+		if kubectl_bin get svc "${cluster}-haproxy" -n "${namespace}" >/dev/null 2>&1; then
+			host="${cluster}-haproxy"
+		elif kubectl_bin get svc "${cluster}-proxysql" -n "${namespace}" >/dev/null 2>&1; then
+			host="${cluster}-proxysql"
+		else
+			echo "No proxy service found for cluster ${cluster}"
+			exit 1
+		fi
+
+		compare_mysql_cmd "select-${id}" \
+			"SELECT GROUP_CONCAT(id ORDER BY id) FROM myApp.myApp;" \
+			"-h ${host} -uroot -p'${root_pass}'"
+	else
+		size="$(get_pxc_size "${cluster}")"
+		for i in $(seq 0 $((size - 1))); do
+			compare_mysql_cmd "select-${id}" \
+				"SELECT GROUP_CONCAT(id ORDER BY id) FROM myApp.myApp;" \
+				"-h ${cluster}-pxc-${i}.${cluster}-pxc -uroot -p'${root_pass}'"
+		done
+	fi
+}
+
+wait_cluster_error() {
+	local cluster=$1
+	local expected_message=$2
+	local max_retry="${3:-180}"
+	local retry=0
+	local state
+	local messages
+
+	until [[ ${state} == "error" && ${messages} == *"${expected_message}"* ]]; do
+		state="$(kubectl_bin get pxc "${cluster}" -o jsonpath='{.status.state}')"
+		messages="$(kubectl_bin get pxc "${cluster}" -o jsonpath='{.status.message}')"
+
+		sleep 2
+		((retry += 1))
+		if [[ ${retry} -ge ${max_retry} ]]; then
+			kubectl_bin get pxc "${cluster}" -o yaml
+			exit 1
+		fi
+	done
+}
+
+wait_cluster_initializing() {
+	local cluster=$1
+	local max_retry="${2:-180}"
+	local retry=0
+
+	echo -n "waiting for pxc/${cluster} to become initializing"
+	until [[ "$(kubectl_bin get pxc "${cluster}" -o jsonpath='{.status.state}')" == "initializing" ]]; do
+		sleep 2
+		echo -n .
+		((retry += 1))
+		if [[ ${retry} -ge ${max_retry} ]]; then
+			kubectl_bin get pxc "${cluster}" -o yaml
+			echo "pxc/${cluster} did not become initializing"
+			exit 1
+		fi
+	done
+	echo ".Ok"
 }

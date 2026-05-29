@@ -3,5 +3,5 @@ kind: PerconaXtraDBClusterBackup
 metadata:
   name: on-demand-backup-pvc
 spec:
-  pxcCluster: unsafe-flags
+  pxcCluster:  backup-if-unhealthy
   storageName: pvc
