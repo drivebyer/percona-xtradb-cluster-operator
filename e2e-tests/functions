@@ -702,6 +702,39 @@ compare_mysql_cmd_local() {
 	fi
 }
 
+compare_data() {
+	local cluster=$1
+	local compare=$2
+	local use_proxy=${3:-false}
+	local size
+
+	local root_pass
+	root_pass=$(get_password "${cluster}" "root")
+
+	if [[ ${use_proxy} == true || ${use_proxy} == "use-proxy" ]]; then
+		local host
+		if kubectl_bin get svc "${cluster}-haproxy" -n "${namespace}" >/dev/null 2>&1; then
+			host="${cluster}-haproxy"
+		elif kubectl_bin get svc "${cluster}-proxysql" -n "${namespace}" >/dev/null 2>&1; then
+			host="${cluster}-proxysql"
+		else
+			echo "No proxy service found for cluster ${cluster}"
+			exit 1
+		fi
+
+		compare_mysql_cmd "${compare}" \
+			"SELECT GROUP_CONCAT(id ORDER BY id) FROM myApp.myApp;" \
+			"-h ${host} -uroot -p'${root_pass}'"
+	else
+		size="$(get_pxc_size "${cluster}")"
+		for i in $(seq 0 $((size - 1))); do
+			compare_mysql_cmd "${compare}" \
+				"SELECT GROUP_CONCAT(id ORDER BY id) FROM myApp.myApp;" \
+				"-h ${cluster}-pxc-${i}.${cluster}-pxc -uroot -p'${root_pass}'"
+		done
+	fi
+}
+
 get_proxy_primary() {
 	local uri="$1"
 	local pod="$2"
@@ -1271,6 +1304,7 @@ run_backup() {
 run_recovery_check() {
 	local cluster=$1
 	local backup=$2
+	local compare=${3:-"select-1"}
 	local proxy=$(get_proxy_engine $cluster)
 	pvc_name=$(get_pvc_name_for_backup "$backup")
 	dest="pvc/$pvc_name"
@@ -1299,14 +1333,11 @@ run_recovery_check() {
 	wait_for_running "$cluster-$proxy" 1
 	wait_for_running "$cluster-pxc" 3
 
-	local secret_name=$(kubectl_bin get pxc ${cluster} -o jsonpath='{.spec.secretsName}')
-	local root_pass=$(getSecretData ${secret_name} "root")
+	local root_pass=$(get_password "${cluster}" "root")
 
 	sleep 35
 	log "check data after pxc-restore/${backup}"
-	compare_mysql_cmd "select-1" "SELECT * from myApp.myApp;" "-h $cluster-pxc-0.$cluster-pxc -uroot -p'${root_pass}'"
-	compare_mysql_cmd "select-1" "SELECT * from myApp.myApp;" "-h $cluster-pxc-1.$cluster-pxc -uroot -p'${root_pass}'"
-	compare_mysql_cmd "select-1" "SELECT * from myApp.myApp;" "-h $cluster-pxc-2.$cluster-pxc -uroot -p'${root_pass}'"
+	compare_data "$cluster" "$compare"
 
 	if [ "$backup" != "on-demand-backup-minio" ]; then
 		log 'copy backup'
@@ -1643,6 +1674,15 @@ getSecretData() {
 	local dataKey=$2
 	kubectl_bin get secrets/${secretName} --template={{.data.${dataKey}}} \
 		| base64 --decode
+}
+
+get_password() {
+	local cluster=$1
+	local user=$2
+
+	getSecretData \
+		"$(kubectl_bin get pxc "${cluster}" -o jsonpath='{.spec.secretsName}')" \
+		"${user}"
 }
 
 checkTLSSecret() {
@@ -2321,9 +2361,7 @@ run_recovery_check_pitr() {
 	wait_for_running "$cluster-pxc" 3
 	wait_cluster_consistency "$cluster" 3 2
 	desc 'check data after backup' $restore
-	compare_mysql_cmd $compare "SELECT * from test.test;" "-h $cluster-pxc-0.$cluster-pxc -uroot -p${mysql_root_pass}"
-	compare_mysql_cmd $compare "SELECT * from test.test;" "-h $cluster-pxc-1.$cluster-pxc -uroot -p${mysql_root_pass}"
-	compare_mysql_cmd $compare "SELECT * from test.test;" "-h $cluster-pxc-2.$cluster-pxc -uroot -p${mysql_root_pass}"
+	compare_data $cluster $compare
 	kubectl_bin delete -f "$test_dir/conf/${restore}.yaml"
 }
 
@@ -2417,15 +2455,6 @@ wait_for_password_propagation() {
 	echo "Old password successfully discarded after $retry retries"
 }
 
-get_password() {
-	local cluster=$1
-	local user=$2
-
-	getSecretData \
-		"$(kubectl_bin get pxc "${cluster}" -o jsonpath='{.spec.secretsName}')" \
-		"${user}"
-}
-
 patch_cluster() {
 	local cluster=$1
 	local patch=$2
@@ -2444,39 +2473,6 @@ write_data() {
 	run_mysql \
 		"INSERT IGNORE myApp.myApp (id) VALUES (${id})" \
 		"-h ${host} -uroot -p'${root_pass}'"
-}
-
-compare_data() {
-	local cluster=$1
-	local id=$2
-	local use_proxy=${3:-false}
-	local size
-
-	local root_pass
-	root_pass=$(get_password "${cluster}" "root")
-
-	if [[ ${use_proxy} == true || ${use_proxy} == "use-proxy" ]]; then
-		local host
-		if kubectl_bin get svc "${cluster}-haproxy" -n "${namespace}" >/dev/null 2>&1; then
-			host="${cluster}-haproxy"
-		elif kubectl_bin get svc "${cluster}-proxysql" -n "${namespace}" >/dev/null 2>&1; then
-			host="${cluster}-proxysql"
-		else
-			echo "No proxy service found for cluster ${cluster}"
-			exit 1
-		fi
-
-		compare_mysql_cmd "select-${id}" \
-			"SELECT GROUP_CONCAT(id ORDER BY id) FROM myApp.myApp;" \
-			"-h ${host} -uroot -p'${root_pass}'"
-	else
-		size="$(get_pxc_size "${cluster}")"
-		for i in $(seq 0 $((size - 1))); do
-			compare_mysql_cmd "select-${id}" \
-				"SELECT GROUP_CONCAT(id ORDER BY id) FROM myApp.myApp;" \
-				"-h ${cluster}-pxc-${i}.${cluster}-pxc -uroot -p'${root_pass}'"
-		done
-	fi
 }
 
 wait_cluster_error() {
