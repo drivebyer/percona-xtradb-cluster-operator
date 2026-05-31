@@ -40,7 +40,7 @@ wait_pvc_pending() {
 backup_should_be_forbidden() {
 	local backup=$1
 
-	run_backup "${cluster}" "${backup}" "${backup}" "Failed"
+	run_backup "${cluster}" "${backup}" "Failed"
 
 	if kubectl_bin get jobs --no-headers 2>/dev/null | grep -q "xb-${backup}"; then
 		kubectl_bin get jobs
@@ -54,10 +54,7 @@ restore_backup() {
 	local backup=$2
 	local expected=$3
 
-	run_restore "${cluster}" "${restore}" "${backup}"
-	wait_for_running "$(get_proxy "${cluster}")" "${proxy_size}"
-	wait_for_running "${cluster}-pxc" "${pxc_size}"
-	wait_cluster_consistency "${cluster}" "${pxc_size}" "${proxy_size}"
+	run_recovery_check "${cluster}" "${backup}"
 	compare_data "${cluster}" "${expected}"
 }
 

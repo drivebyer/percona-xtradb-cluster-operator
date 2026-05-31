@@ -1258,44 +1258,14 @@ check_pvc_md5() {
 run_backup() {
 	local cluster=$1
 	local backup=$2
-	local backup_file=${3:-}
-	local status=${4:-Succeeded}
-	local backup_path
+	local status=${3:-Succeeded}
 
 	log "run pxc-backup/${backup}"
 
-	if [[ -n "${backup_file}" ]]; then
-		backup_path="${test_dir}/conf/${backup_file}.yml"
-	else
-		backup_path="${src_dir}/deploy/backup/backup.yaml"
-	fi
-
-	yq eval ".metadata.name = \"${backup}\" | .spec.pxcCluster = \"${cluster}\"" "${backup_path}" \
-		| kubectl_bin apply -f -
+	kubectl_bin apply \
+		-f ${test_dir}/conf/${backup}.yml
 
 	wait_backup "${backup}" "${status}"
-}
-
-run_restore() {
-	local cluster=$1
-	local restore=$2
-	local backup=$3
-	local restore_file=${4:-}
-	local restore_path
-
-	log "run pxc-restore/${restore}"
-
-	if [[ -n "${restore_file}" ]]; then
-		restore_path="${test_dir}/conf/${restore_file}.yml"
-	else
-		restore_path="${src_dir}/deploy/backup/restore.yaml"
-	fi
-
-	yq eval ".metadata.name = \"${restore}\" | .spec.pxcCluster = \"${cluster}\" | .spec.backupName = \"${backup}\"" "${restore_path}" \
-		| kubectl_bin apply -f -
-
-	wait_backup_restore "${restore}"
-	kubectl_bin logs "job/restore-job-${restore}-${cluster}"
 }
 
 run_recovery_check() {

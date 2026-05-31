@@ -50,7 +50,7 @@ test_pxc_size_unsafe_flag() {
 	compare_data "${cluster}" "2"
 
 	desc 'run backup while PXC runs with one replica'
-	run_backup "${cluster}" "${backup}" "on-demand-backup-pvc"
+	run_backup "${cluster}" "on-demand-backup-pvc"
 
 	desc 'write data while PXC runs with one replica'
 	write_data "${cluster}" 100502
@@ -72,9 +72,7 @@ test_pxc_size_unsafe_flag() {
 	compare_data "${cluster}" "3"
 
 	desc 'restore backup after PXC is back to three replicas'
-	run_restore "${cluster}" "restore-${backup}" "${backup}"
-	wait_for_running "${cluster}-pxc" "${pxc_size}"
-	wait_cluster_consistency "${cluster}" "${pxc_size}" "${proxy_size}"
+	run_recovery_check "${cluster}" "${backup}"
 	compare_data "${cluster}" "2"
 }
 
