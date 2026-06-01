@@ -756,13 +756,13 @@ compare_data() {
 		fi
 
 		compare_mysql_cmd "${compare}" \
-			"SELECT GROUP_CONCAT(id ORDER BY id) FROM ${database}.${table};" \
+			"SELECT id FROM ${database}.${table} ORDER BY id;" \
 			"-h ${host} -uroot -p'${root_pass}'"
 	else
 		size="$(get_pxc_size "${cluster}")"
 		for i in $(seq 0 $((size - 1))); do
 			compare_mysql_cmd "${compare}" \
-				"SELECT GROUP_CONCAT(id ORDER BY id) FROM ${database}.${table};" \
+				"SELECT id FROM ${database}.${table} ORDER BY id;" \
 				"-h ${cluster}-pxc-${i}.${cluster}-pxc -uroot -p'${root_pass}'"
 		done
 	fi
