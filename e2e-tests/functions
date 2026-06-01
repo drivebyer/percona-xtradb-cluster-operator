@@ -139,46 +139,65 @@ version_gt() {
 
 get_pxc_size() {
 	local cluster=${1}
-	kubectl_bin get pxc "${cluster}" -o 'jsonpath={.spec.pxc.size}'
+	local size=0
+
+	size="$(kubectl_bin get pxc "${cluster}" -o 'jsonpath={.spec.pxc.size}')"
+	echo "${size}"
 }
 
 get_proxy_size() {
 	local cluster=${1}
+	local size=0
+
 	if [[ "$(kubectl_bin get pxc "${cluster}" -o 'jsonpath={.spec.haproxy.enabled}')" == "true" ]]; then
-		kubectl_bin get pxc "${cluster}" -o 'jsonpath={.spec.haproxy.size}'
-		return
+		size="$(kubectl_bin get pxc "${cluster}" -o 'jsonpath={.spec.haproxy.size}')"
+	elif [[ "$(kubectl_bin get pxc "${cluster}" -o 'jsonpath={.spec.proxysql.enabled}')" == "true" ]]; then
+		size="$(kubectl_bin get pxc "${cluster}" -o 'jsonpath={.spec.proxysql.size}')"
 	fi
-	if [[ "$(kubectl_bin get pxc "${cluster}" -o 'jsonpath={.spec.proxysql.enabled}')" == "true" ]]; then
-		kubectl_bin get pxc "${cluster}" -o 'jsonpath={.spec.proxysql.size}'
-		return
-	fi
+
+	echo "${size}"
 }
 
 wait_cluster_consistency() {
 	local cluster_name=${1}
-	local cluster_size=${2}
-	local proxy_size=${3}
+	local pxc_size=${2:-"$(get_pxc_size "$cluster_name")"}
+	local proxy_size=${3:-"$(get_proxy_size "$cluster_name")"}
 
-	if [ -z "${proxy_size}" ]; then
-		proxy_size="$(get_proxy_size "$cluster_name")"
-	fi
 	desc "wait cluster consistency"
-	local i=0
 	local max=300
+	local delay=5
+	local retries=$((max / delay))
+	local state
+	local pxc_ready
+	local proxy_ready
+
 	sleep 7 # wait for two reconcile loops ;)  3 sec x 2 times + 1 sec = 7 seconds
 	echo -n "waiting for pxc/${cluster_name} to be ready"
-	until [[ "$(kubectl_bin get pxc "${cluster_name}" -o jsonpath='{.status.state}')" == "ready" &&
-	"$(kubectl_bin get pxc "${cluster_name}" -o jsonpath='{.status.pxc.ready}')" == "${cluster_size}" &&
-	"$(kubectl_bin get pxc "${cluster_name}" -o jsonpath='{.status.'$(get_proxy_engine ${cluster_name})'.ready}')" == "${proxy_size}" ]]; do
-		echo -n .
-		sleep 5
-		if [[ $i -ge $max ]]; then
-			echo "Something went wrong waiting for cluster consistency!"
-			exit 1
+	for _ in $(seq 1 "${retries}"); do
+		state="$(kubectl_bin get pxc "${cluster_name}" -o jsonpath='{.status.state}')"
+		pxc_ready="$(kubectl_bin get pxc "${cluster_name}" -o jsonpath='{.status.pxc.ready}')"
+		proxy_ready=0
+
+		if [[ ${proxy_size} -gt 0 ]]; then
+			proxy_ready="$(
+				kubectl_bin get pxc "${cluster_name}" \
+					-o jsonpath='{.status.'$(get_proxy_engine ${cluster_name})'.ready}'
+			)"
 		fi
-		let i+=1
+
+		if [[ ${state} == "ready" &&
+			${pxc_ready} == "${pxc_size}" &&
+			${proxy_ready} == "${proxy_size}" ]]; then
+			echo
+			return
+		fi
+
+		echo -n .
+		sleep "${delay}"
 	done
-	echo
+
+	echo "Something went wrong waiting for cluster consistency!"
+	exit 1
 }
 
 create_namespace() {
@@ -249,7 +268,7 @@ wait_pod() {
 	set +o xtrace
 	kubectl_bin wait --for=condition=Ready pod/${pod} --timeout="${max_retry}s" ${ns:+-n $ns} || true
 	retry=0
-	echo "waiting for pod/$pod to become Ready"
+	echo -n "waiting for pod/$pod to become Ready"
 	until kubectl_bin get ${ns:+-n $ns} pod/$pod -o jsonpath='{.status.conditions[?(@.type == "Ready")].status}' 2>/dev/null | grep -q -i 'True' \
 		&& kubectl_bin get ${ns:+-n $ns} pod/$pod | grep -q "^$pod" \
 		&& ! IS_FULL_CRASH=$(kubectl_bin logs --tail=1 ${ns:+-n $ns} pod/$pod ${container:+ -c $container} | grep LAST_LINE); do
@@ -425,9 +444,22 @@ create_infra() {
 
 wait_for_running() {
 	local name="$1"
-	let last_pod="$(($2 - 1))" || :
+	local size="${2:-0}"
+	local last_pod
 	local max_retry="${3:-480}"
-	desc "Waiting for ${2} running pods for ${name}"
+
+	if [[ -z ${name} ]]; then
+		desc "No resource provided to wait for running pods"
+		return
+	fi
+
+	if [[ ${size} -le 0 ]]; then
+		desc "No running pods expected for ${name}"
+		return
+	fi
+
+	last_pod=$((size - 1))
+	desc "Waiting for ${size} running pods for ${name}"
 	for i in $(seq 0 $last_pod); do
 		wait_pod ${name}-${i} ${max_retry}
 	done
@@ -706,6 +738,8 @@ compare_data() {
 	local cluster=$1
 	local compare=$2
 	local use_proxy=${3:-false}
+	local database=${4:-"myApp"}
+	local table=${5:-"myApp"}
 	local size
 
 	local root_pass
@@ -723,16 +757,31 @@ compare_data() {
 		fi
 
 		compare_mysql_cmd "${compare}" \
-			"SELECT GROUP_CONCAT(id ORDER BY id) FROM myApp.myApp;" \
+			"SELECT GROUP_CONCAT(id ORDER BY id) FROM ${database}.${table};" \
 			"-h ${host} -uroot -p'${root_pass}'"
 	else
 		size="$(get_pxc_size "${cluster}")"
 		for i in $(seq 0 $((size - 1))); do
 			compare_mysql_cmd "${compare}" \
-				"SELECT GROUP_CONCAT(id ORDER BY id) FROM myApp.myApp;" \
+				"SELECT GROUP_CONCAT(id ORDER BY id) FROM ${database}.${table};" \
 				"-h ${cluster}-pxc-${i}.${cluster}-pxc -uroot -p'${root_pass}'"
 		done
 	fi
+}
+
+write_data() {
+	local cluster=$1
+	local id=$2
+	local host=${3:-"${cluster}-pxc-0.${cluster}-pxc"}
+	local database=${4:-"myApp"}
+	local table=${5:-"myApp"}
+
+	local root_pass
+	root_pass=$(get_password "${cluster}" "root")
+
+	run_mysql \
+		"INSERT IGNORE ${database}.${table} (id) VALUES (${id})" \
+		"-h ${host} -uroot -p'${root_pass}'"
 }
 
 get_proxy_primary() {
@@ -1094,7 +1143,6 @@ get_proxy() {
 		echo "${target_cluster}-proxysql"
 		return
 	fi
-	echo "${target_cluster}-pxc"
 }
 
 get_proxy_engine() {
@@ -1142,10 +1190,8 @@ spinup_pxc() {
 	fi
 	run_mysql \
 		"CREATE DATABASE IF NOT EXISTS myApp; use myApp; CREATE TABLE IF NOT EXISTS myApp (id int PRIMARY KEY) $encrypt;" \
-		"-h $proxy -uroot -p'${root_pass}' -P$port"
-	run_mysql \
-		'INSERT myApp.myApp (id) VALUES (100500)' \
-		"-h $proxy -uroot -p'${root_pass}' -P$port"
+		"-h "${cluster}-pxc-0.${cluster}-pxc" -uroot -p'${root_pass}' -P$port"
+	write_data "$cluster" 100500
 	sleep 30
 	for i in $(seq 0 $((size - 1))); do
 		compare_mysql_cmd "select-1" "SELECT * from myApp.myApp;" "-h $cluster-pxc-$i.$cluster-pxc -uroot -p'${root_pass}' -P$port"
@@ -2361,9 +2407,7 @@ run_recovery_check_pitr() {
 	wait_for_running "$cluster-pxc" 3
 	wait_cluster_consistency "$cluster" 3 2
 	desc 'check data after backup' $restore
-	compare_mysql_cmd $compare "SELECT * from test.test;" "-h $cluster-pxc-0.$cluster-pxc -uroot -p${mysql_root_pass}"
-	compare_mysql_cmd $compare "SELECT * from test.test;" "-h $cluster-pxc-1.$cluster-pxc -uroot -p${mysql_root_pass}"
-	compare_mysql_cmd $compare "SELECT * from test.test;" "-h $cluster-pxc-2.$cluster-pxc -uroot -p${mysql_root_pass}"
+	compare_data "$cluster" "$compare" "false" "test" "test"
 	kubectl_bin delete -f "$test_dir/conf/${restore}.yaml"
 }
 
@@ -2462,19 +2506,6 @@ patch_cluster() {
 	local patch=$2
 
 	kubectl_bin patch pxc "${cluster}" --type=merge --patch "${patch}"
-}
-
-write_data() {
-	local cluster=$1
-	local id=$2
-	local host=${3:-"${cluster}-pxc-0.${cluster}-pxc"}
-
-	local root_pass
-	root_pass=$(get_password "${cluster}" "root")
-
-	run_mysql \
-		"INSERT IGNORE myApp.myApp (id) VALUES (${id})" \
-		"-h ${host} -uroot -p'${root_pass}'"
 }
 
 wait_cluster_error() {
