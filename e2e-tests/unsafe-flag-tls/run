@@ -5,6 +5,8 @@ set -o errexit
 test_dir=$(realpath "$(dirname "$0")")
 . "${test_dir}"/../functions
 
+set_debug
+
 cluster="tls"
 pxc_size=3
 proxy_size=3
