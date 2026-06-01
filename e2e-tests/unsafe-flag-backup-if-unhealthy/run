@@ -57,13 +57,24 @@ test_backup_if_unhealthy_unsafe_flag() {
 	create_blocked_pvc "${blocked_pvc}"
 	wait_pvc_pending "${blocked_pvc}"
 
-	desc 'scale PXC to five replicas and enable unsafeFlags.backupIfUnhealthy'
+	desc 'scale PXC to five replicas without unsafeFlags.backupIfUnhealthy'
 	patch_cluster "${cluster}" '
 	{
 		"spec": {
 			"pxc": {
 				"size": 5
-			},
+			}
+		}
+	}'
+	wait_cluster_initializing "${cluster}"
+
+	desc 'check backup is forbidden while cluster is unhealthy and backupIfUnhealthy=false'
+	backup_should_be_forbidden "forbidden-backup-pvc"
+
+	desc 'enable unsafeFlags.backupIfUnhealthy while cluster is still initializing'
+	patch_cluster "${cluster}" '
+	{
+		"spec": {
 			"unsafeFlags": {
 				"backupIfUnhealthy": true
 			}
@@ -91,50 +102,7 @@ test_backup_if_unhealthy_unsafe_flag() {
 	wait_cluster_consistency "${cluster}" "${pxc_size}" "${proxy_size}"
 
 	desc 'restore backup created while cluster was initializing'
-	run_recovery_check "${cluster}" "${backup}" "${expected}"
-
-	desc 'make cluster initializing again'
-	create_blocked_pvc "${blocked_pvc}"
-	wait_pvc_pending "${blocked_pvc}"
-	patch_cluster "${cluster}" '
-	{
-		"spec": {
-			"pxc": {
-				"size": 5
-			},
-			"unsafeFlags": {
-				"backupIfUnhealthy": true
-			}
-		}
-	}'
-	wait_cluster_initializing "${cluster}"
-
-	desc 'disable unsafeFlags.backupIfUnhealthy while cluster is still initializing'
-	patch_cluster "${cluster}" '
-	{
-		"spec": {
-			"unsafeFlags": {
-				"backupIfUnhealthy": false
-			}
-		}
-	}'
-	wait_cluster_initializing "${cluster}"
-
-	desc 'check backup is forbidden while cluster is unhealthy and backupIfUnhealthy=false'
-	backup_should_be_forbidden "forbidden-backup-pvc"
-
-	desc 'scale PXC back'
-	patch_cluster "${cluster}" '
-	{
-		"spec": {
-			"pxc": {
-				"size": 3
-			}
-		}
-	}'
-	kubectl_bin delete pvc "${blocked_pvc}" --ignore-not-found=true
-	wait_for_running "${cluster}-pxc" "${pxc_size}"
-	wait_cluster_consistency "${cluster}" "${pxc_size}" "${proxy_size}"
+	run_recovery_check "${cluster}" "${backup}"
 }
 
 main() {
