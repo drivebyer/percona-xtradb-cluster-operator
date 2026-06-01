@@ -164,10 +164,9 @@ wait_cluster_consistency() {
 	local proxy_size=${3:-"$(get_proxy_size "$cluster_name")"}
 
 	desc "wait cluster consistency"
-	local max=300
+	local max_seconds=1500
 	local delay=5
-	local retries=$((max / delay))
-	local state
+	local retries=$((max_seconds / delay))
 	local pxc_ready
 	local proxy_ready
 
