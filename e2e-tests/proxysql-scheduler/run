@@ -138,7 +138,7 @@ log "scheduler is enabled in ${cluster}-proxysql-1: OK"
 
 desc 'check PXC pod 1 is promoted to writer when pod-0 is down'
 
-# Keep pxc-0 down for the entire duration of the checks. 
+# Keep pxc-0 down for the entire duration of the checks.
 # The loop runs while ${run_file} exists.
 run_file=$(mktemp)
 keep_pod_down "${cluster}-pxc-0" "${run_file}" &
