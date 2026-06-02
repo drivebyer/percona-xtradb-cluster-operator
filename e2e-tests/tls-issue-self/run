@@ -114,7 +114,7 @@ main() {
 		fi
 		probe=$(run_mysql "SELECT 1;" "-h ${cluster}-proxysql -uroot -proot_password")
 		if [ "$probe" != "1" ]; then
-			echo "error: downtime during certificate rotation"
+			echo "error: downtime during certificate rotation. Probe result: $probe"
 			exit 1
 		fi
 		sleep 5
