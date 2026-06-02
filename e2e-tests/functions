@@ -736,9 +736,10 @@ compare_mysql_cmd_local() {
 compare_data() {
 	local cluster=$1
 	local compare=$2
-	local use_proxy=${3:-false}
-	local database=${4:-"myApp"}
-	local table=${5:-"myApp"}
+	local use_proxy=${3:-"false"}
+	local port=${4:-"-P 3306"}
+	local database=${5:-"myApp"}
+	local table=${6:-"myApp"}
 	local size
 
 	local root_pass
@@ -746,24 +747,21 @@ compare_data() {
 
 	if [[ ${use_proxy} == true || ${use_proxy} == "use-proxy" ]]; then
 		local host
-		if kubectl_bin get svc "${cluster}-haproxy" -n "${namespace}" >/dev/null 2>&1; then
-			host="${cluster}-haproxy"
-		elif kubectl_bin get svc "${cluster}-proxysql" -n "${namespace}" >/dev/null 2>&1; then
-			host="${cluster}-proxysql"
-		else
+		host=$(get_proxy "${cluster}")
+		if [[ -z $host ]]; then
 			echo "No proxy service found for cluster ${cluster}"
 			exit 1
 		fi
 
 		compare_mysql_cmd "${compare}" \
 			"SELECT id FROM ${database}.${table} ORDER BY id;" \
-			"-h ${host} -uroot -p'${root_pass}'"
+			"-h ${host} ${port} -uroot -p'${root_pass}'"
 	else
 		size="$(get_pxc_size "${cluster}")"
 		for i in $(seq 0 $((size - 1))); do
 			compare_mysql_cmd "${compare}" \
 				"SELECT id FROM ${database}.${table} ORDER BY id;" \
-				"-h ${cluster}-pxc-${i}.${cluster}-pxc -uroot -p'${root_pass}'"
+				"-h ${cluster}-pxc-${i}.${cluster}-pxc ${port} -uroot -p'${root_pass}'"
 		done
 	fi
 }
@@ -771,16 +769,23 @@ compare_data() {
 write_data() {
 	local cluster=$1
 	local id=$2
-	local host=${3:-"${cluster}-pxc-0.${cluster}-pxc"}
-	local database=${4:-"myApp"}
-	local table=${5:-"myApp"}
+	local use_proxy=${3:-"false"}
+	local port=${4:-"-P 3306"}
+	local database=${5:-"myApp"}
+	local table=${6:-"myApp"}
 
 	local root_pass
 	root_pass=$(get_password "${cluster}" "root")
+	proxy=$(get_proxy "${cluster}")
+	if [[ (${use_proxy} == true || ${use_proxy} == "use-proxy") && -n $proxy ]]; then
+		host="-h ${proxy}"
+	else
+		host="-h ${cluster}-pxc-0.${cluster}-pxc"
+	fi
 
 	run_mysql \
 		"INSERT IGNORE ${database}.${table} (id) VALUES (${id})" \
-		"-h ${host} -uroot -p'${root_pass}'"
+		"${host} ${port} -uroot -p'${root_pass}'"
 }
 
 get_proxy_primary() {
@@ -1147,6 +1152,7 @@ get_proxy() {
 get_proxy_engine() {
 	local cluster_name=$1
 	local cluster_proxy="$(get_proxy ${cluster_name})"
+
 	echo "${cluster_proxy//$cluster_name-/}"
 }
 
@@ -1189,12 +1195,12 @@ spinup_pxc() {
 	fi
 	run_mysql \
 		"CREATE DATABASE IF NOT EXISTS myApp; use myApp; CREATE TABLE IF NOT EXISTS myApp (id int PRIMARY KEY) $encrypt;" \
-		"-h "${cluster}-pxc-0.${cluster}-pxc" -uroot -p'${root_pass}' -P$port"
-	write_data "$cluster" 100500
+		"-h ${cluster}-pxc-0.${cluster}-pxc -uroot -p'${root_pass}' -P$port"
+	write_data "$cluster" 100500 "no-proxy" "-P$port"
 	sleep 30
-	for i in $(seq 0 $((size - 1))); do
-		compare_mysql_cmd "select-1" "SELECT * from myApp.myApp;" "-h $cluster-pxc-$i.$cluster-pxc -uroot -p'${root_pass}' -P$port"
-	done
+
+	desc 'compare initial data'
+	compare_data "$cluster" "select-1" "no-proxy" "-P$port"
 
 	if is_keyring_plugin_in_use "$cluster"; then
 		log "keyring plugin is used. checking encryption..."
@@ -2406,7 +2412,7 @@ run_recovery_check_pitr() {
 	wait_for_running "$cluster-pxc" 3
 	wait_cluster_consistency "$cluster" 3 2
 	desc 'check data after backup' $restore
-	compare_data "$cluster" "$compare" "false" "test" "test"
+	compare_data "$cluster" "$compare" "no-proxy" "-P 3306" "test" "test"
 	kubectl_bin delete -f "$test_dir/conf/${restore}.yaml"
 }
 

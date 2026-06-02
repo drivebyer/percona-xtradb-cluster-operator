@@ -55,7 +55,7 @@ test_proxy_size_unsafe_flag() {
 	compare_data "${cluster}" "${expected_before}" "use-proxy"
 
 	desc "write data while ${proxy_engine} runs with one replica"
-	write_data "${cluster}" "${write_id}" "${proxy}"
+	write_data "${cluster}" "${write_id}" "use-proxy"
 	compare_data "${cluster}" "${expected}" "use-proxy"
 
 	desc "disable unsafeFlags.proxySize and scale ${proxy_engine} back"
@@ -76,7 +76,7 @@ test_proxy_size_unsafe_flag() {
 
 test_haproxy_size_unsafe_flag() {
 	desc 'write data before HAProxy unsafe size test'
-	write_data "${cluster}" 100501 "${cluster}-haproxy"
+	write_data "${cluster}" 100501 "use-proxy"
 	compare_data "${cluster}" "select-2" "use-proxy"
 
 	check_proxy_size_without_unsafe_flag \
@@ -123,7 +123,7 @@ test_proxysql_size_unsafe_flag() {
 	enable_proxysql
 
 	desc 'write data before ProxySQL unsafe size test'
-	write_data "${cluster}" 100502 "$(get_proxy "${cluster}")"
+	write_data "${cluster}" 100502 "use-proxy"
 	compare_data "${cluster}" "select-3" "use-proxy"
 
 	check_proxy_size_without_unsafe_flag \
