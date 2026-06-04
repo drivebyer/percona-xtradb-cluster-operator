@@ -2185,8 +2185,8 @@ deploy_pmm3_server() {
 }
 
 wait_for_pmm_service() {
-	timeout=420
-	start=$(date +%s)
+	local timeout=420
+	local start=$(date +%s)
 
 	until kubectl_bin get svc monitoring-service -o jsonpath='{.status.loadBalancer.ingress[0]}' 2>/dev/null | grep -q .; do
 		if (($(date +%s) - start >= timeout)); then

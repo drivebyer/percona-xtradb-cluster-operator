@@ -272,18 +272,19 @@ main() {
 		backup_dest_azure=$(kubectl_bin get pxc-backup "$backup_name_azure" -o jsonpath='{.status.destination}' | sed -e 's/.json$//' | cut -c 9-)
 
 		desc "Check backup existence"
-		setup_aws_credentials
-		check_backup_existence_aws "$backup_dest_aws" "/xtrabackup_binlog_info.00000000000000000000"
-		setup_gcs_credentials
-		check_backup_existence_gcs "${backup_dest_gcp}" "/xtrabackup_binlog_info.00000000000000000000"
-		setup_azure_credentials
-		check_backup_existence_azure "${backup_dest_azure}" "/xtrabackup_binlog_info.00000000000000000000"
-
-		kubectl_bin delete pxc-backup --all
 		dest_file="/xtrabackup_binlog_info.00000000000000000000"
 		if [[ $MYSQL_VERSION == "5.7" ]]; then
 			dest_file="/xtrabackup_info.00000000000000000000"
 		fi
+
+		setup_aws_credentials
+		check_backup_existence_aws "$backup_dest_aws" "$dest_file"
+		setup_gcs_credentials
+		check_backup_existence_gcs "${backup_dest_gcp}" "$dest_file"
+		setup_azure_credentials
+		check_backup_existence_azure "${backup_dest_azure}" "$dest_file"
+
+		kubectl_bin delete pxc-backup --all
 
 		desc "Check backup deletion"
 		check_backup_deletion_aws "$backup_dest_aws" "$dest_file"
