@@ -5,18 +5,19 @@ tests = []
 void createCluster(String CLUSTER_SUFFIX) {
     withCredentials([string(credentialsId: 'GCP_PROJECT_ID', variable: 'GCP_PROJECT'), file(credentialsId: 'gcloud-key-file', variable: 'CLIENT_SECRET_FILE')]) {
         sh """
+            export CLOUDSDK_CONFIG=/tmp/gcloud-$CLUSTER_NAME-${CLUSTER_SUFFIX}
             export KUBECONFIG=/tmp/$CLUSTER_NAME-${CLUSTER_SUFFIX}
             gcloud auth activate-service-account --key-file $CLIENT_SECRET_FILE
             gcloud config set project $GCP_PROJECT
             ret_num=0
             while [ \${ret_num} -lt 15 ]; do
                 ret_val=0
-                gcloud container clusters list --filter $CLUSTER_NAME-${CLUSTER_SUFFIX} --zone ${region} --format='csv[no-heading](name)' | xargs gcloud container clusters delete --zone ${region} --quiet || true
+                gcloud container clusters list --filter $CLUSTER_NAME-${CLUSTER_SUFFIX} --zone ${region} --format='csv[no-heading](name)' | xargs -r gcloud container clusters delete --zone ${region} --quiet || true
                 gcloud container clusters create $CLUSTER_NAME-${CLUSTER_SUFFIX} \
                     --preemptible \
                     --zone ${region} \
                     --machine-type=c2d-standard-4 \
-                    --cluster-version=1.32 \
+                    --cluster-version=1.33 \
                     --num-nodes=3 \
                     --labels delete-cluster-after-hours=6 \
                     --disk-size 30 \
@@ -35,7 +36,7 @@ void createCluster(String CLUSTER_SUFFIX) {
                 ret_num=\$((ret_num + 1))
             done
             if [ \${ret_num} -eq 15 ]; then
-                gcloud container clusters list --filter $CLUSTER_NAME-${CLUSTER_SUFFIX} --zone ${region} --format='csv[no-heading](name)' | xargs gcloud container clusters delete --zone ${region} --quiet || true
+                gcloud container clusters list --filter $CLUSTER_NAME-${CLUSTER_SUFFIX} --zone ${region} --format='csv[no-heading](name)' | xargs -r gcloud container clusters delete --zone ${region} --quiet || true
                 exit 1
             fi
         """
@@ -45,6 +46,7 @@ void createCluster(String CLUSTER_SUFFIX) {
 void shutdownCluster(String CLUSTER_SUFFIX) {
     withCredentials([string(credentialsId: 'GCP_PROJECT_ID', variable: 'GCP_PROJECT'), file(credentialsId: 'gcloud-key-file', variable: 'CLIENT_SECRET_FILE')]) {
         sh """
+            export CLOUDSDK_CONFIG=/tmp/gcloud-$CLUSTER_NAME-${CLUSTER_SUFFIX}
             export KUBECONFIG=/tmp/$CLUSTER_NAME-${CLUSTER_SUFFIX}
             gcloud auth activate-service-account --key-file $CLIENT_SECRET_FILE
             gcloud config set project $GCP_PROJECT
@@ -58,6 +60,7 @@ void shutdownCluster(String CLUSTER_SUFFIX) {
             done
             kubectl get svc --all-namespaces || true
             gcloud container clusters delete --zone ${region} $CLUSTER_NAME-${CLUSTER_SUFFIX}
+            rm -rf "/tmp/gcloud-$CLUSTER_NAME-${CLUSTER_SUFFIX}"
         """
    }
 }
@@ -66,6 +69,8 @@ void deleteOldClusters(String FILTER) {
     withCredentials([string(credentialsId: 'GCP_PROJECT_ID', variable: 'GCP_PROJECT'), file(credentialsId: 'gcloud-key-file', variable: 'CLIENT_SECRET_FILE')]) {
         sh """
             if gcloud --version > /dev/null 2>&1; then
+                export CLOUDSDK_CONFIG=\$(mktemp -d)
+                trap "rm -rf \$CLOUDSDK_CONFIG" EXIT
                 gcloud auth activate-service-account --key-file $CLIENT_SECRET_FILE
                 gcloud config set project $GCP_PROJECT
                 for GKE_CLUSTER in \$(gcloud container clusters list --format='csv[no-heading](name)' --filter="$FILTER"); do
@@ -148,6 +153,7 @@ void markPassedTests() {
 
 void printKubernetesStatus(String LOCATION, String CLUSTER_SUFFIX) {
     sh """
+        export CLOUDSDK_CONFIG=/tmp/gcloud-$CLUSTER_NAME-$CLUSTER_SUFFIX
         export KUBECONFIG=/tmp/$CLUSTER_NAME-$CLUSTER_SUFFIX
         echo "========== KUBERNETES STATUS $LOCATION TEST =========="
         gcloud container clusters list|grep -E "NAME|$CLUSTER_NAME-$CLUSTER_SUFFIX "
@@ -259,6 +265,7 @@ void runTest(Integer TEST_ID) {
                     else
                         export DEBUG_TESTS=1
                     fi
+                    export CLOUDSDK_CONFIG=/tmp/gcloud-$CLUSTER_NAME-$clusterSuffix
                     export KUBECONFIG=/tmp/$CLUSTER_NAME-$clusterSuffix
                     export MYSQL_VERSION=$mysqlVer
                     time bash e2e-tests/$testName/run
@@ -293,7 +300,7 @@ void prepareNode() {
         sudo curl -sLo /usr/local/bin/kubectl https://dl.k8s.io/release/\$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl && sudo chmod +x /usr/local/bin/kubectl
         kubectl version --client --output=yaml
 
-        curl -fsSL https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz | sudo tar -C /usr/local/bin --strip-components 1 -xzf - linux-amd64/helm
+        curl -fsSL https://get.helm.sh/helm-v3.20.0-linux-amd64.tar.gz | sudo tar -C /usr/local/bin --strip-components 1 -xzf - linux-amd64/helm
 
         sudo curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64 -o /usr/local/bin/yq && sudo chmod +x /usr/local/bin/yq
         sudo curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux64 -o /usr/local/bin/jq && sudo chmod +x /usr/local/bin/jq
@@ -312,11 +319,20 @@ EOF
         curl -sL https://github.com/mitchellh/golicense/releases/latest/download/golicense_0.2.0_linux_x86_64.tar.gz | sudo tar -C /usr/local/bin -xzf - golicense
 
         sudo yum install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm || true
-        sudo percona-release enable-only tools
-        sudo yum install -y percona-xtrabackup-80 | true
+        sudo percona-release enable pxb-84-lts
+        sudo yum install -y percona-xtrabackup-84 || true
     """
+    installCfssl()
     installAzureCLI()
     azureAuth()
+}
+
+void installCfssl() {
+    sh """
+        sudo curl -fsSL https://github.com/cloudflare/cfssl/releases/download/v1.6.5/cfssl_1.6.5_linux_amd64 -o /usr/local/bin/cfssl
+        sudo curl -fsSL https://github.com/cloudflare/cfssl/releases/download/v1.6.5/cfssljson_1.6.5_linux_amd64 -o /usr/local/bin/cfssljson
+        sudo chmod +x /usr/local/bin/cfssl /usr/local/bin/cfssljson
+    """
 }
 
 void azureAuth() {
@@ -391,13 +407,16 @@ void checkE2EIgnoreFiles() {
     echo "Excluded files: $excludedFiles"
     echo "Changed files: $changedFiles"
 
-    def excludedFilesRegex = excludedFiles.collect{it.replace("**", ".*").replace("*", "[^/]*")}
+    // Use placeholder so the * in ".*" (from **) is not replaced by [^/]*
+    def excludedFilesRegex = excludedFiles.collect{
+        it.replace("**", ".__STARSTAR__").replace("*", "[^/]*").replace(".__STARSTAR__", ".*")
+    }
     needToRunTests = !changedFiles.every{changed -> excludedFilesRegex.any{regex -> changed ==~ regex}}
 
     if (needToRunTests) {
         echo "Some changed files are outside of the e2eignore list. Proceeding with execution."
     } else {
-        if (currentBuild.previousBuild?.result != 'SUCCESS') {
+        if (currentBuild.previousBuild?.result != 'SUCCESS' && currentBuild.number != 1) {
             echo "All changed files are e2eignore files, and previous build was unsuccessful. Propagating previous state."
             currentBuild.result = currentBuild.previousBuild?.result
             error "Skipping execution as non-significant changes detected and previous build was unsuccessful."
@@ -517,7 +536,7 @@ pipeline {
                             --rm \
                             -v $WORKSPACE/src/github.com/percona/percona-xtradb-cluster-operator:/go/src/github.com/percona/percona-xtradb-cluster-operator \
                             -w /go/src/github.com/percona/percona-xtradb-cluster-operator \
-                            golang:1.25 sh -c '
+                            golang:1.26 sh -c '
                                 go install -mod=readonly github.com/google/go-licenses@latest;
                                 /go/bin/go-licenses csv github.com/percona/percona-xtradb-cluster-operator/cmd/manager \
                                     | cut -d , -f 3 \
@@ -546,7 +565,7 @@ pipeline {
                             -w /go/src/github.com/percona/percona-xtradb-cluster-operator \
                             -e GO111MODULE=on \
                             -e GOFLAGS='-buildvcs=false' \
-                            golang:1.25 sh -c 'go build -v -o percona-xtradb-cluster-operator github.com/percona/percona-xtradb-cluster-operator/cmd/manager'
+                            golang:1.26 sh -c 'go build -v -o percona-xtradb-cluster-operator github.com/percona/percona-xtradb-cluster-operator/cmd/manager'
                     "
                 '''
 
@@ -631,6 +650,26 @@ pipeline {
                 stage('cluster12') {
                     steps {
                         clusterRunner('cluster12')
+                    }
+                }
+                stage('cluster13') {
+                    steps {
+                        clusterRunner('cluster13')
+                    }
+                }
+                stage('cluster14') {
+                    steps {
+                        clusterRunner('cluster14')
+                    }
+                }
+                stage('cluster15') {
+                    steps {
+                        clusterRunner('cluster15')
+                    }
+                }
+                stage('cluster16') {
+                    steps {
+                        clusterRunner('cluster16')
                     }
                 }
             }

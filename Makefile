@@ -11,6 +11,8 @@ DEPLOYDIR = ./deploy
 # leading to test or pipeline failures.
 ENVTEST_K8S_VERSION = 1.34.1
 
+ENVTEST_VERSION ?= release-0.23
+
 all: build
 
 help: ## Display this help.
@@ -102,13 +104,15 @@ kustomize: ## Download kustomize locally if necessary.
 
 ENVTEST = $(shell pwd)/bin/setup-envtest
 envtest: ## Download envtest-setup locally if necessary.
-	$(call go-get-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest@latest)
+	$(call go-get-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION))
 
 SWAGGER = $(shell pwd)/bin/swagger
 swagger: ## Download swagger locally if necessary.
 	$(call go-get-tool,$(SWAGGER),github.com/go-swagger/go-swagger/cmd/swagger@latest)
 
 PROTOC_VERSION = 33.1
+PROTOC_GEN_GO_VERSION = v1.36.11
+PROTOC_GEN_GO_GRPC_VERSION = v1.6.2
 PROTOC = $(shell pwd)/bin/protoc
 PROTOC_GEN_GO = $(shell pwd)/bin/protoc-gen-go
 PROTOC_GEN_GO_GRPC = $(shell pwd)/bin/protoc-gen-go-grpc
@@ -128,8 +132,8 @@ protoc: ## Download protoc locally if necessary.
 		mv -f protoc-${PROTOC_VERSION}-$${os}-$${arch}/bin/protoc $(PROTOC); \
 		rm -rf protoc-${PROTOC_VERSION}-$${os}-$${arch}; \
 	fi
-	$(call go-get-tool,$(PROTOC_GEN_GO),google.golang.org/protobuf/cmd/protoc-gen-go@latest)
-	$(call go-get-tool,$(PROTOC_GEN_GO_GRPC),google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest)
+	$(call go-get-tool,$(PROTOC_GEN_GO),google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION))
+	$(call go-get-tool,$(PROTOC_GEN_GO_GRPC),google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION))
 
 # Prepare release
 include e2e-tests/release_versions
@@ -152,26 +156,82 @@ release: manifests
 		-e "/initContainer:/,/image:/{s#image: .*#image: $(IMAGE_OPERATOR)#}" \
 		-e "/^  pmm:/,/^    image:/{s#image: .*#image: $(IMAGE_PMM3_CLIENT)#}" deploy/cr.yaml
 
+update-version:
+	echo $(NEXT_VER) > pkg/version/version.txt
+
 # Prepare main branch after release
 MAJOR_VER := $(shell grep -oE "crVersion: .*" deploy/cr.yaml|grep -oE "[0-9]+\.[0-9]+\.[0-9]+"|cut -d'.' -f1)
 MINOR_VER := $(shell grep -oE "crVersion: .*" deploy/cr.yaml|grep -oE "[0-9]+\.[0-9]+\.[0-9]+"|cut -d'.' -f2)
 NEXT_VER ?= $(MAJOR_VER).$$(($(MINOR_VER) + 1)).0
-after-release: manifests
-	echo $(NEXT_VER) > pkg/version/version.txt
+after-release: update-version manifests upgrade-consistency-after-release
 	$(SED) -i \
 		-e "s/crVersion: .*/crVersion: $(NEXT_VER)/" \
 		-e "/^  pxc:/,/^    image:/{s#image: .*#image: perconalab/percona-xtradb-cluster-operator:main-pxc8.4#}" \
 		-e "/^  haproxy:/,/^    image:/{s#image: .*#image: perconalab/percona-xtradb-cluster-operator:main-haproxy#}" \
-		-e "/^  logcollector:/,/^    image:/{s#image: .*#image: perconalab/percona-xtradb-cluster-operator:main-logcollector#}" deploy/cr-minimal.yaml
+		-e "/^  logcollector:/,/^    image:/{s#image: .*#image: perconalab/fluentbit:main-logcollector#}" deploy/cr-minimal.yaml
 	$(SED) -i \
 		-e "s/crVersion: .*/crVersion: $(NEXT_VER)/" \
 		-e "/^  pxc:/,/^    image:/{s#image: .*#image: perconalab/percona-xtradb-cluster-operator:main-pxc8.4#}" \
 		-e "/^  haproxy:/,/^    image:/{s#image: .*#image: perconalab/percona-xtradb-cluster-operator:main-haproxy#}" \
 		-e "/^  proxysql:/,/^    image:/{s#image: .*#image: perconalab/percona-xtradb-cluster-operator:main-proxysql#}" \
-		-e "/^  logcollector:/,/^    image:/{s#image: .*#image: perconalab/percona-xtradb-cluster-operator:main-logcollector#}" \
+		-e "/^  logcollector:/,/^    image:/{s#image: .*#image: perconalab/fluentbit:main-logcollector#}" \
 		-e "/^  backup:/,/^    image:/{s#image: .*#image: perconalab/percona-xtradb-cluster-operator:main-pxc8.4-backup#}" \
 		-e "/initContainer:/,/image:/{s#image: .*#image: perconalab/percona-xtradb-cluster-operator:main#}" \
 		-e "/^  pmm:/,/^    image:/{s#image: .*#image: perconalab/pmm-client:3-dev-latest#}" deploy/cr.yaml
+# Revert release_versions file to perconalab dev images
+	$(SED) -i \
+		-e "s#^IMAGE_OPERATOR=.*#IMAGE_OPERATOR=perconalab/percona-xtradb-cluster-operator:main#" \
+		-e "s#^IMAGE_PXC84=.*#IMAGE_PXC84=perconalab/percona-xtradb-cluster-operator:main-pxc8.4#" \
+		-e "s#^IMAGE_BACKUP84=.*#IMAGE_BACKUP84=perconalab/percona-xtradb-cluster-operator:main-pxc8.4-backup#" \
+		-e "s#^IMAGE_PXC80=.*#IMAGE_PXC80=perconalab/percona-xtradb-cluster-operator:main-pxc8.0#" \
+		-e "s#^IMAGE_BACKUP80=.*#IMAGE_BACKUP80=perconalab/percona-xtradb-cluster-operator:main-pxc8.0-backup#" \
+		-e "s#^IMAGE_PXC57=.*#IMAGE_PXC57=perconalab/percona-xtradb-cluster-operator:main-pxc5.7#" \
+		-e "s#^IMAGE_BACKUP57=.*#IMAGE_BACKUP57=perconalab/percona-xtradb-cluster-operator:main-pxc5.7-backup#" \
+		-e "s#^IMAGE_PROXY=.*#IMAGE_PROXY=perconalab/percona-xtradb-cluster-operator:main-proxysql#" \
+		-e "s#^IMAGE_PROXY3=.*#IMAGE_PROXY3=perconalab/percona-xtradb-cluster-operator:main-proxysql3#" \
+		-e "s#^IMAGE_HAPROXY=.*#IMAGE_HAPROXY=perconalab/percona-xtradb-cluster-operator:main-haproxy#" \
+		-e "s#^IMAGE_LOGCOLLECTOR=.*#IMAGE_LOGCOLLECTOR=perconalab/fluentbit:main-logcollector#" \
+		-e "s#^IMAGE_PMM_CLIENT=.*#IMAGE_PMM_CLIENT=perconalab/pmm-client:dev-latest#" \
+		-e "s#^IMAGE_PMM_SERVER=.*#IMAGE_PMM_SERVER=perconalab/pmm-server:dev-latest#" \
+		-e "s#^IMAGE_PMM3_CLIENT=.*#IMAGE_PMM3_CLIENT=perconalab/pmm-client:3-dev-latest#" \
+		-e "s#^IMAGE_PMM3_SERVER=.*#IMAGE_PMM3_SERVER=perconalab/pmm-server:3-dev-latest#" e2e-tests/release_versions
+
+# Update the upgrade-consistency test window to the next version.
+# Gets the 3 tested versions from the run file, drops the oldest, keeps the two newest, and appends the next development version X.(Y+1).0.
+# Copies and renames compare files, bumps generation version in statefulset compare files.
+UC_DIR := e2e-tests/upgrade-consistency
+.PHONY: upgrade-consistency-after-release
+upgrade-consistency-after-release: ## Slide upgrade-consistency test window to the next version
+	@set -e; \
+	dir=$(UC_DIR); cmp=$$dir/compare; run=$$dir/run; \
+	vers=$$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' $$run | awk '!seen[$$0]++' | sort -t. -k1,1n -k2,2n -k3,3n); \
+	n=$$(printf '%s\n' "$$vers" | grep -c .); \
+	[ "$$n" -eq 3 ] || { echo "ERROR: expected 3 tested versions in $$run, found $$n: $$vers" >&2; exit 1; }; \
+	v1=$$(printf '%s\n' "$$vers" | sed -n 1p); \
+	v2=$$(printf '%s\n' "$$vers" | sed -n 2p); \
+	v3=$$(printf '%s\n' "$$vers" | sed -n 3p); \
+	major=$${v3%%.*}; minor=$$(echo "$$v3" | cut -d. -f2); \
+	vnew=$$major.$$((minor + 1)).0; \
+	suf() { echo "$$1" | tr -d .; }; \
+	esc() { echo "$$1" | sed 's/\./\\./g'; }; \
+	echo "upgrade-consistency: replace old with new versions: [$$v1 $$v2 $$v3] -> [$$v2 $$v3 $$vnew]"; \
+	$(SED) -i "s/$$(esc $$v3)/$$vnew/g; s/-$$(suf $$v3)/-$$(suf $$vnew)/g" $$run; \
+	$(SED) -i "s/$$(esc $$v2)/$$v3/g; s/-$$(suf $$v2)/-$$(suf $$v3)/g" $$run; \
+	$(SED) -i "s/$$(esc $$v1)/$$v2/g; s/-$$(suf $$v1)/-$$(suf $$v2)/g" $$run; \
+	s2=$$(suf $$v2); s3=$$(suf $$v3); snew=$$(suf $$vnew); \
+	for f in $$cmp/*$$s3*; do cp "$$f" "$$(echo "$$f" | sed "s/$$s3/$$snew/")"; done; \
+	for s in $$s2 $$s3; do \
+		for f in $$cmp/statefulset_*$$s*; do \
+			g=$$(awk '/^  generation:/{print $$2; exit}' "$$f"); \
+			[ -n "$$g" ] && $(SED) -i "s/^  generation: $$g$$/  generation: $$((g - 1))/" "$$f"; \
+		done; \
+	done; \
+	keep=" $$s2 $$s3 $$snew "; \
+	for f in $$cmp/*.yml; do \
+		v=$$(basename "$$f" | grep -oE '[0-9]+'); \
+		case "$$keep" in *" $$v "*) : ;; *) rm -f "$$f" ;; esac; \
+	done; \
+	echo "upgrade-consistency: done; review with: git status $$dir"
 
 VS_BRANCH = main
 version-service-client: swagger
